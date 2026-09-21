@@ -1,14 +1,18 @@
 import express from "express";
+import cors from "cors";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
 
 const app = express();
+
+// CHÍNH LÀ DÒNG NÀY: Cấp phép cho Gemini kết nối vào
+app.use(cors());
+
 const server = new Server({ name: "fb-cloud-publisher", version: "1.0.0" }, { capabilities: { tools: {} } });
 let transport;
 
-// Dạy AI biết dùng công cụ từ xa
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [{
     name: "dang_video_len_facebook",
@@ -24,7 +28,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   }]
 }));
 
-// Nhận lệnh và truyền URL sang Facebook
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === "dang_video_len_facebook") {
     const { video_url, noi_dung } = request.params.arguments;
@@ -44,7 +47,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   throw new Error("Công cụ không tồn tại");
 });
 
-// Mở "cửa sổ" mạng để Gemini Spark kết nối vào
 app.get("/sse", async (req, res) => {
   transport = new SSEServerTransport("/message", res);
   await server.connect(transport);
