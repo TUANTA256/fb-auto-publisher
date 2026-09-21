@@ -7,16 +7,15 @@ import axios from "axios";
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // Bắt buộc phải có để đọc dữ liệu từ Gemini
+// ĐÃ XÓA: app.use(express.json()) - Để hệ thống MCP tự do đọc dữ liệu
 
-// Két sắt lưu trữ các phiên kết nối song song của Gemini
 const transportMap = new Map();
 
 app.get("/sse", async (req, res) => {
-  // Tạo luồng giao tiếp mới
-  const transport = new SSEServerTransport("/message", res);
+  // Cung cấp đường dẫn tuyệt đối cho Gemini để tránh lạc đường
+  const messageEndpoint = "/message";
+  const transport = new SSEServerTransport(messageEndpoint, res);
   
-  // Khởi tạo một Server độc lập cho phiên này
   const mcpServer = new Server({ name: "fb-cloud-publisher", version: "1.0.0" }, { capabilities: { tools: {} } });
 
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -53,23 +52,22 @@ app.get("/sse", async (req, res) => {
     throw new Error("Công cụ không tồn tại");
   });
 
-  // Kết nối và lưu phiên làm việc
   await mcpServer.connect(transport);
   transportMap.set(transport.sessionId, transport);
   
-  // Tự động dọn dẹp khi Gemini ngắt kết nối
-  res.on('close', () => {
+  // Dọn dẹp session khi đóng kết nối
+  req.on('close', () => {
     transportMap.delete(transport.sessionId);
   });
 });
 
+// Route này chỉ nhận luồng data thô để MCP tự xử lý
 app.post("/message", async (req, res) => {
-  // Phân luồng tin nhắn dựa theo ID phiên kết nối
   const sessionId = req.query.sessionId;
   const transport = transportMap.get(sessionId);
   
   if (!transport) {
-    return res.status(404).send("Session không tồn tại hoặc đã đóng.");
+    return res.status(404).send("Session không tồn tại.");
   }
   
   await transport.handlePostMessage(req, res);
