@@ -6,6 +6,7 @@ import axios from "axios";
 
 const app = express();
 
+// Cấu hình CORS cho phép mọi nguồn kết nối
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -14,11 +15,11 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json());
+// LƯU Ý: Đã xóa app.use(express.json()) ở đây để tránh làm hỏng luồng dữ liệu SSE của MCP
 
 const transportMap = new Map();
 
-// ĐÃ ĐỔI TÊN ĐƯỜNG DẪN THÀNH /mcp CHO ĐÚNG CHUẨN GEMINI SPARK
+// Đường dẫn SSE đúng chuẩn cho Gemini Spark / AI Clients
 app.get("/mcp", async (req, res) => {
   const transport = new SSEServerTransport("/message", res);
   const mcpServer = new Server({ name: "fb-cloud-publisher", version: "1.0.0" }, { capabilities: { tools: {} } });
@@ -51,7 +52,7 @@ app.get("/mcp", async (req, res) => {
         );
         return { content: [{ type: "text", text: `Đăng thành công! Video ID: ${response.data.id}` }] };
       } catch (error) {
-         return { content: [{ type: "text", text: `Lỗi đăng bài: ${error.message}` }], isError: true };
+         return { content: [{ type: "text", text: `Lỗi đăng bài: ${error.response?.data ? JSON.stringify(error.response.data) : error.message}` }], isError: true };
       }
     }
     throw new Error("Công cụ không tồn tại");
@@ -59,8 +60,13 @@ app.get("/mcp", async (req, res) => {
 
   await mcpServer.connect(transport);
   transportMap.set(transport.sessionId, transport);
+
+  req.on('close', () => {
+    transportMap.delete(transport.sessionId);
+  });
 });
 
+// Xử lý thông điệp gửi từ AI qua query sessionId
 app.post("/message", async (req, res) => {
   const sessionId = req.query.sessionId;
   const transport = transportMap.get(sessionId);
