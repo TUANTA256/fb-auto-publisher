@@ -7,19 +7,17 @@ import axios from "axios";
 
 const app = express();
 app.use(cors());
+app.use(express.json()); // Bắt buộc phải có để đọc dữ liệu từ Gemini
 
-// Khai báo biến toàn cục
-let transport;
-let mcpServer;
+// Két sắt lưu trữ các phiên kết nối song song của Gemini
+const transportMap = new Map();
 
 app.get("/sse", async (req, res) => {
-  // 1. QUAN TRỌNG: Nếu có kết nối cũ bị kẹt, đóng nó lại trước
-  if (mcpServer) {
-    try { await mcpServer.close(); } catch (e) {}
-  }
-
-  // 2. Khởi tạo một phiên làm việc mới tinh cho Gemini
-  mcpServer = new Server({ name: "fb-cloud-publisher", version: "1.0.0" }, { capabilities: { tools: {} } });
+  // Tạo luồng giao tiếp mới
+  const transport = new SSEServerTransport("/message", res);
+  
+  // Khởi tạo một Server độc lập cho phiên này
+  const mcpServer = new Server({ name: "fb-cloud-publisher", version: "1.0.0" }, { capabilities: { tools: {} } });
 
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [{
@@ -55,17 +53,26 @@ app.get("/sse", async (req, res) => {
     throw new Error("Công cụ không tồn tại");
   });
 
-  // 3. Kết nối với Gemini
-  transport = new SSEServerTransport("/message", res);
+  // Kết nối và lưu phiên làm việc
   await mcpServer.connect(transport);
+  transportMap.set(transport.sessionId, transport);
+  
+  // Tự động dọn dẹp khi Gemini ngắt kết nối
+  res.on('close', () => {
+    transportMap.delete(transport.sessionId);
+  });
 });
 
-app.post("/message", express.json(), async (req, res) => {
-  if (transport) {
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(400).send("Chưa có kết nối nào.");
+app.post("/message", async (req, res) => {
+  // Phân luồng tin nhắn dựa theo ID phiên kết nối
+  const sessionId = req.query.sessionId;
+  const transport = transportMap.get(sessionId);
+  
+  if (!transport) {
+    return res.status(404).send("Session không tồn tại hoặc đã đóng.");
   }
+  
+  await transport.handlePostMessage(req, res);
 });
 
 const PORT = process.env.PORT || 3000;
