@@ -1,9 +1,11 @@
 import express from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 
 const app = express();
 
@@ -18,17 +20,15 @@ app.use((req, res, next) => {
 
 // LƯU Ý: Đã xóa app.use(express.json()) ở đây để tránh làm hỏng luồng dữ liệu SSE của MCP
 
-const transportMap = new Map();
+const sseTransportMap = new Map();
+const streamableTransportMap = new Map();
 
 app.get("/", (_req, res) => {
   res.status(200).json({ status: "ok", service: "fb-cloud-publisher" });
 });
 
-// Đường dẫn SSE đúng chuẩn cho Gemini Spark / AI Clients
-app.get("/mcp", async (req, res) => {
-  const transport = new SSEServerTransport("/message", res);
+function createMcpServer() {
   const mcpServer = new Server({ name: "fb-cloud-publisher", version: "1.0.0" }, { capabilities: { tools: {} } });
-
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [{
       name: "dang_video_len_facebook",
@@ -43,7 +43,55 @@ app.get("/mcp", async (req, res) => {
       }
     }]
   }));
+  registerToolHandler(mcpServer);
 
+  return mcpServer;
+}
+
+// MCP Streamable HTTP endpoint for current AI clients, including Gemini.
+app.all("/mcp", async (req, res) => {
+  try {
+    const sessionId = req.headers["mcp-session-id"];
+    let transport = sessionId ? streamableTransportMap.get(sessionId) : undefined;
+
+    if (!transport) {
+      if (req.method !== "POST") {
+        return res.status(400).json({ error: "MCP session chưa được khởi tạo." });
+      }
+
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: randomUUID,
+        onsessioninitialized: (newSessionId) => {
+          streamableTransportMap.set(newSessionId, transport);
+        },
+      });
+      const mcpServer = createMcpServer();
+      await mcpServer.connect(transport);
+      transport.onclose = () => {
+        if (transport.sessionId) streamableTransportMap.delete(transport.sessionId);
+      };
+    }
+
+    await transport.handleRequest(req, res);
+  } catch (error) {
+    if (!res.headersSent) res.status(500).json({ error: error.message });
+  }
+});
+
+// Legacy SSE endpoint retained for clients that do not support Streamable HTTP.
+app.get("/sse", async (req, res) => {
+  const transport = new SSEServerTransport("/message", res);
+  const mcpServer = createMcpServer();
+
+  await mcpServer.connect(transport);
+  sseTransportMap.set(transport.sessionId, transport);
+
+  req.on("close", () => {
+    sseTransportMap.delete(transport.sessionId);
+  });
+});
+
+function registerToolHandler(mcpServer) {
   mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (request.params.name === "dang_video_len_facebook") {
       const { video_url, noi_dung } = request.params.arguments;
@@ -84,19 +132,12 @@ app.get("/mcp", async (req, res) => {
     }
     throw new Error("Công cụ không tồn tại");
   });
-
-  await mcpServer.connect(transport);
-  transportMap.set(transport.sessionId, transport);
-
-  req.on('close', () => {
-    transportMap.delete(transport.sessionId);
-  });
-});
+}
 
 // Xử lý thông điệp gửi từ AI qua query sessionId
 app.post("/message", async (req, res) => {
   const sessionId = req.query.sessionId;
-  const transport = transportMap.get(sessionId);
+  const transport = sseTransportMap.get(sessionId);
   if (transport) {
     await transport.handlePostMessage(req, res);
   } else {
